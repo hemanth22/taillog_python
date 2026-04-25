@@ -1,6 +1,6 @@
 # 📜 TailLog Python (Kivy)
 
-A lightweight, real-time Python GUI application built with the [Kivy](https://kivy.org/) framework for tailing and monitoring streaming application logs.
+A lightweight, real-time Python GUI application built with the [Kivy](https://kivy.org/) framework for tailing and monitoring streaming application logs with [Google Antigravity IDE](https://antigravity.ai/).
 
 ---
 
