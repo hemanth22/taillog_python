@@ -111,6 +111,21 @@ class LogTailApp(App):
         self.current_match_index = 0
         self.case_sensitive = False
         self.all_log_text = ''
+        self.max_line_len = 0
+        
+    def _update_width_from_text(self, text_chunk, reset=False):
+        if reset:
+            self.max_line_len = 0
+        if text_chunk:
+            chunk_max = max((len(line) for line in text_chunk.split('\n')), default=0)
+            if chunk_max > self.max_line_len:
+                self.max_line_len = chunk_max
+                
+        calc_width = self.max_line_len * 8 + 30
+        if hasattr(self, 'scroll_view') and self.scroll_view:
+            self.log_display.width = max(self.scroll_view.width or 800, calc_width)
+        else:
+            self.log_display.width = max(800, calc_width)
 
     def build(self):
         Window.size = (900, 700)
@@ -154,10 +169,8 @@ class LogTailApp(App):
         follow_label = Label(text='Follow log (tail -f):', size_hint_x=0.3, halign='left', valign='middle', color=(0, 0, 0, 1))
         follow_label.bind(size=follow_label.setter('text_size'))
 
-        self.follow_checkbox = CheckBox(active=False, size_hint_x=0.1, background_checkbox_normal='atlas://data/images/defaulttheme/checkbox_off', background_checkbox_down='atlas://data/images/defaulttheme/checkbox_on')
+        self.follow_checkbox = CheckBox(active=False, size_hint_x=0.1, color=(0, 0, 0, 1), background_checkbox_normal='atlas://data/images/defaulttheme/checkbox_off', background_checkbox_down='atlas://data/images/defaulttheme/checkbox_on')
         self.follow_checkbox.bind(active=self.toggle_follow)
-        # Make checkbox more visible with bright cyan color
-        self.follow_checkbox.background_color = (0, 1, 1, 1)
 
         self.status_label = Label(text='Ready', size_hint_x=0.6, halign='left', valign='middle', color=(0, 0, 0, 1))
         self.status_label.bind(size=self.status_label.setter('text_size'))
@@ -183,10 +196,8 @@ class LogTailApp(App):
         case_label = Label(text='Case Sensitive:', size_hint_x=0.12, halign='left', valign='middle', color=(0, 0, 0, 1))
         case_label.bind(size=case_label.setter('text_size'))
         
-        self.case_sensitive_checkbox = CheckBox(active=False, size_hint_x=0.08)
+        self.case_sensitive_checkbox = CheckBox(active=False, size_hint_x=0.08, color=(0, 0, 0, 1))
         self.case_sensitive_checkbox.bind(active=self.on_case_sensitive_toggle)
-        # Make checkbox more visible with bright magenta color
-        self.case_sensitive_checkbox.background_color = (1, 0, 1, 1)
         
         clear_search_btn = Button(text='Clear', size_hint_x=0.08, background_color=(0.6, 0.6, 0.6, 1))
         clear_search_btn.bind(on_press=self.clear_search)
@@ -200,15 +211,37 @@ class LogTailApp(App):
         search_section.add_widget(clear_search_btn)
 
         # Log display section
-        scroll_view = ScrollView(size_hint=(1, 1))
-        self.log_display = CopyableTextInput(text='', readonly=True, multiline=True, font_size=12, background_color=(1, 1, 1, 1), foreground_color=(0, 0, 0, 1))
-        scroll_view.add_widget(self.log_display)
+        self.scroll_view = ScrollView(
+            size_hint=(1, 1),
+            do_scroll_x=True,
+            do_scroll_y=True,
+            scroll_type=['bars', 'content'],
+            bar_width=15,
+            bar_color=[0.4, 0.4, 0.4, 0.9],
+            bar_inactive_color=[0.7, 0.7, 0.7, 0.5]
+        )
+        self.log_display = CopyableTextInput(
+            text='', 
+            readonly=True, 
+            multiline=True, 
+            font_size=12, 
+            background_color=(1, 1, 1, 1), 
+            foreground_color=(0, 0, 0, 1),
+            size_hint=(None, None),
+            do_wrap=False
+        )
+        self.log_display.bind(minimum_height=self.log_display.setter('height'))
+        
+        # TextInput doesn't have minimum_width, so we calculate it dynamically
+        # We bind only to scroll_view width changes. Text changes are handled explicitly for performance.
+        self.scroll_view.bind(width=lambda *args: self._update_width_from_text('', reset=False))
+        self.scroll_view.add_widget(self.log_display)
 
         main_layout.add_widget(path_section)
         main_layout.add_widget(status_section)
         main_layout.add_widget(follow_section)
         main_layout.add_widget(search_section)
-        main_layout.add_widget(scroll_view)
+        main_layout.add_widget(self.scroll_view)
 
         return main_layout
 
@@ -263,8 +296,9 @@ class LogTailApp(App):
             self.status_label.text = f'Error opening file: {e}'
             return
         self.file_path = path
-        self.file_label.text = os.path.basename(path)
+        self.file_label.text = os.path.abspath(path)
         self.log_display.text = text
+        self._update_width_from_text(text, reset=True)
         self.all_log_text = ''  # Reset so we don't restore old filtered content
         self.search_input.text = ''  # Clear search on new file
         self.status_label.text = f'Loaded {path}'
@@ -289,17 +323,42 @@ class LogTailApp(App):
                 # Go to end
                 f.seek(0, os.SEEK_END)
                 while not self.stop_following:
-                    line = f.readline()
-                    if not line:
+                    lines = f.readlines()
+                    if not lines:
+                        f.seek(f.tell()) # Clear EOF flag for Windows
                         time.sleep(0.2)
                         continue
-                    Clock.schedule_once(lambda dt, l=line: self.append_text(l))
+                    
+                    # Batch append all new lines at once to avoid GUI freezing
+                    new_text = "".join(lines)
+                    Clock.schedule_once(lambda dt, t=new_text: self.append_text(t))
         except Exception as e:
             Clock.schedule_once(lambda dt: setattr(self.status_label, 'text', f'Follow error: {e}'))
 
     def append_text(self, text):
-        self.log_display.text += text
-        self.log_display.cursor = (len(self.log_display.text), 0)
+        # Update width calculation incrementally to avoid massive performance penalty
+        self._update_width_from_text(text, reset=False)
+        
+        # Prevent the log from growing indefinitely and freezing Kivy
+        # Set a very large limit (5 million characters, ~5MB) to avoid premature truncation
+        MAX_LEN = 5000000
+        current_len = len(self.log_display.text)
+        
+        if current_len + len(text) > MAX_LEN:
+            new_text = self.log_display.text + text
+            self.log_display.text = new_text[-MAX_LEN:]
+            self._update_width_from_text(self.log_display.text, reset=True)
+        else:
+            # Much faster append using insert_text instead of fully replacing the huge string
+            lines = getattr(self.log_display, '_lines', None)
+            if lines:
+                self.log_display.cursor = (len(lines[-1]), len(lines) - 1)
+            self.log_display.insert_text(text)
+        
+        # Scroll to bottom if "Follow log" is active
+        if self.follow_checkbox.active:
+            # We schedule it slightly so Kivy recalculates the layout height first
+            Clock.schedule_once(lambda dt: setattr(self.scroll_view, 'scroll_y', 0), 0.1)
 
     def stop_and_clear(self, instance):
         self.stop_following = True
@@ -348,8 +407,26 @@ class LogTailApp(App):
             self.current_match_index = 0
         
         match_pos = self.search_matches[self.current_match_index]
-        self.log_display.cursor = (match_pos, 0)
         
+        # Convert raw string index to (col, row)
+        col, row = self.log_display.get_cursor_from_index(match_pos)
+        self.log_display.cursor = (col, row)
+        
+        # Select the text to make it highly visible
+        self.log_display.select_text(match_pos, match_pos + len(search_term))
+        
+        # Scroll the parent ScrollView to the matching line
+        if hasattr(self, 'scroll_view') and self.log_display.height > self.scroll_view.height:
+            line_y = row * self.log_display.line_height
+            max_scroll = self.log_display.height - self.scroll_view.height
+            
+            # Target Y positions the match roughly in the middle of the view
+            target_y = line_y - (self.scroll_view.height / 2)
+            target_y = max(0, min(target_y, max_scroll))
+            
+            # scroll_y is 1.0 at the top, 0.0 at the bottom
+            self.scroll_view.scroll_y = 1.0 - (target_y / max_scroll)
+            
         self.status_label.text = f'Match {self.current_match_index + 1} of {len(self.search_matches)}'
         self.current_match_index = (self.current_match_index + 1) % len(self.search_matches)
 
